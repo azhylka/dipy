@@ -49,3 +49,30 @@ cdef class SimplePeakGen(PmfGen):
     cdef cnp.npy_intp _inside_global_bounds(self,
                                             cnp.npy_intp* index) noexcept nogil
     pass
+
+cdef extern from "direction/inr_torch_helper.h":
+    ctypedef struct INRTorchModule_t
+    ctypedef INRTorchModule_t* INRTorchModule
+    INRTorchModule inr_torch_load(const char* path) nogil
+    void           inr_torch_free(INRTorchModule m) nogil
+    int            inr_torch_infer(INRTorchModule m,
+                                   const float*   coord,
+                                   double*        coeff_out,
+                                   int            n_coeffs) nogil
+
+cdef class INRPmfGen(PmfGen):
+    cdef:
+        INRTorchModule _module
+        double         _sx
+        double         _sy
+        double         _sz
+        double[:, :]   _B
+        int            _n_verts
+        int            _n_coeffs
+
+    cdef double* get_pmf_c(self,
+                            double* point,
+                            double* out) noexcept nogil
+    cdef double  get_pmf_value_c(self,
+                                 double* point,
+                                 double* xyz) noexcept nogil

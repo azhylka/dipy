@@ -14,6 +14,7 @@ from dipy.core.interpolation cimport (
     trilinear_interpolate4d_c,
 )
 from libc.stdlib cimport malloc, free
+from libc.string cimport memset
 
 cdef extern from "stdlib.h" nogil:
     void *memset(void *ptr, int value, size_t num)
@@ -489,3 +490,142 @@ cdef class SimplePeakGen(PmfGen):
                 out_indices[idx_base + j] = self.peak_indices_ptr[off_indices]
 
         return peaks_used
+
+cdef class INRPmfGen(PmfGen):
+    """PmfGen backed by a TorchScript INR — no GIL held during tracking.
+
+    Drop-in replacement for ``SHCoeffPmfGen`` in any dipy tracking code,
+    including :class:`~dipy.tracking.local_tracking.LocalTracking`.
+    Unlike ``INRPmfGenCython``, this class never re-acquires the GIL after
+    construction: the entire ``get_pmf_c`` / ``get_pmf_value_c`` path is
+    pure C/C++.
+
+    Examples
+    --------
+    >>> import torch
+    >>> traced = torch.jit.trace(model, torch.zeros(1, 3))
+    >>> traced.save("model.ts")
+    >>> from dipy.direction import INRPmfGen
+    >>> pmf_gen = INRPmfGen("model.ts", (224, 224, 132), sphere, sh_order=8)
+    >>> from dipy.direction.probabilistic_direction_getter import \\
+    ...     ProbabilisticDirectionGetter
+    >>> dg = ProbabilisticDirectionGetter(pmf_gen, max_angle=30, sphere=sphere)
+    >>> from dipy.tracking.local_tracking import LocalTracking
+    >>> streamlines = LocalTracking(dg, sc, seeds, affine, step_size=0.5)
+    """
+
+    def __init__(self, ts_path, spatial_shape, sphere, sh_order,
+                 basis_type='tournier07', legacy=True):
+        from dipy.reconst.shm import sph_harm_lookup
+
+        # ── base class (dummy data — never accessed by our get_pmf_c) ────────
+        dummy = np.zeros((1, 1, 1, 1), dtype=np.float64)
+        PmfGen.__init__(self, dummy, sphere)
+
+        # ── load TorchScript module via C++ (GIL not needed after this) ──────
+        path_bytes = str(ts_path).encode('utf-8')
+        self._module = inr_torch_load(path_bytes)
+        if self._module == NULL:
+            raise RuntimeError(
+                f"inr_torch_load failed — check that '{ts_path}' is a valid "
+                "TorchScript file produced by torch.jit.trace().save()."
+            )
+
+        # ── SH basis matrix B : (n_verts, n_coeffs) ──────────────────────────
+        basis_fn = sph_harm_lookup.get(basis_type)
+        if basis_fn is None:
+            raise ValueError(
+                f"Unknown basis_type '{basis_type}'. "
+                f"Valid values: {list(sph_harm_lookup.keys())}"
+            )
+        B, _, _ = basis_fn(sh_order, sphere.theta, sphere.phi, legacy=legacy)
+        self._B = np.asarray(B, dtype=np.float64, order='C')
+        self._n_verts  = self._B.shape[0]
+        self._n_coeffs = self._B.shape[1]
+
+        # ── coordinate normalisation constants ────────────────────────────────
+        sx, sy, sz = spatial_shape
+        self._sx = float(sx) - 1.0
+        self._sy = float(sy) - 1.0
+        self._sz = float(sz) - 1.0
+
+    def __dealloc__(self):
+        if self._module != NULL:
+            inr_torch_free(self._module)
+            self._module = NULL
+
+    # ── Python-accessible wrapper (mirrors PmfGen.get_pmf) ────────────────────
+
+    def get_pmf(self, double[::1] point, double[:] out=None):
+        """PMF at a single voxel-space position."""
+        if out is None:
+            out = self.pmf
+        return <double[:self._n_verts]>self.get_pmf_c(&point[0], &out[0])
+
+    # ── C-level hook — identical structure to SHCoeffPmfGen ──────────────────
+
+    cdef double* get_pmf_c(self, double* point, double* out) noexcept nogil:
+        """Fill *out* with the PMF at *point* (voxel coordinates).
+
+        Step 1: inr_torch_infer  → coeff[n_coeffs]   (replaces trilinear)
+        Step 2: B[i,j]*coeff[j] → out[i]             (identical to SHCoeffPmfGen)
+        Both steps are GIL-free.
+        """
+        cdef:
+            cnp.npy_intp i, j
+            double _sum
+            float  coord[3]
+            double *coeff = <double*> malloc(self._n_coeffs * sizeof(double))
+
+        if coeff == NULL:
+            memset(out, 0, self._n_verts * sizeof(double))
+            return out
+
+        # ── 1. Normalise voxel coord → [-1, 1]^3  ────────────────────────────
+        coord[0] = <float>(2.0 * point[0] / self._sx - 1.0)
+        coord[1] = <float>(2.0 * point[1] / self._sy - 1.0)
+        coord[2] = <float>(2.0 * point[2] / self._sz - 1.0)
+
+        # ── 2. INR forward pass (C++, no GIL) ────────────────────────────────
+        if inr_torch_infer(self._module, coord, coeff, self._n_coeffs) != 0:
+            free(coeff)
+            memset(out, 0, self._n_verts * sizeof(double))
+            return out
+
+        # ── 3. B @ coeff → out, clip negatives (same as SHCoeffPmfGen) ───────
+        for i in range(self._n_verts):
+            _sum = 0.0
+            for j in range(self._n_coeffs):
+                _sum = _sum + self._B[i, j] * coeff[j]
+            out[i] = _sum if _sum > 0.0 else 0.0
+
+        free(coeff)
+        return out
+
+    cdef double get_pmf_value_c(self, double* point, double* xyz) noexcept nogil:
+        """PMF value in a specific direction *xyz* (unit vector).
+
+        Mirrors ``SHCoeffPmfGen.get_pmf_value_c``: evaluates the INR at
+        *point*, then returns the PMF entry for the closest sphere vertex
+        to *xyz*.
+        """
+        cdef:
+            cnp.npy_intp idx = self.find_closest(xyz)
+            cnp.npy_intp j
+            float  coord[3]
+            double _sum = 0.0
+            double *coeff = <double*> malloc(self._n_coeffs * sizeof(double))
+
+        if coeff == NULL:
+            return 0.0
+
+        coord[0] = <float>(2.0 * point[0] / self._sx - 1.0)
+        coord[1] = <float>(2.0 * point[1] / self._sy - 1.0)
+        coord[2] = <float>(2.0 * point[2] / self._sz - 1.0)
+
+        if inr_torch_infer(self._module, coord, coeff, self._n_coeffs) == 0:
+            for j in range(self._n_coeffs):
+                _sum = _sum + self._B[idx, j] * coeff[j]
+
+        free(coeff)
+        return _sum if _sum > 0.0 else 0.0

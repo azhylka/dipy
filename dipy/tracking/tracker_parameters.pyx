@@ -21,7 +21,7 @@ def generate_tracking_parameters(algo_name, *,
     double probe_length=0.5, double probe_radius=0, int probe_quality=3,
     int probe_count=1, double data_support_exponent=1, int random_seed=0,
     double peak_values_threshold=0.0239, double angle_threshold=60,
-    double min_total_weight=0.5):
+    double min_total_weight=0.5, inr_spatial_shape=None, int inr_sh_order=8):
 
     cdef TrackerParameters params
 
@@ -35,7 +35,9 @@ def generate_tracking_parameters(algo_name, *,
                                    pmf_threshold=pmf_threshold,
                                    max_angle=max_angle,
                                    random_seed=random_seed,
-                                   return_all=return_all)
+                                   return_all=return_all,
+                                   inr_spatial_shape=inr_spatial_shape,
+                                   inr_sh_order=inr_sh_order)
         params.set_tracker_c(deterministic_propagator)
         return params
     elif algo_name in ['probabilistic', 'prob']:
@@ -46,7 +48,9 @@ def generate_tracking_parameters(algo_name, *,
                                    pmf_threshold=pmf_threshold,
                                    max_angle=max_angle,
                                    random_seed=random_seed,
-                                   return_all=return_all)
+                                   return_all=return_all,
+                                   inr_spatial_shape=inr_spatial_shape,
+                                   inr_sh_order=inr_sh_order)
         params.set_tracker_c(probabilistic_propagator)
         return params
     elif algo_name == 'ptt':
@@ -62,7 +66,9 @@ def generate_tracking_parameters(algo_name, *,
                                    probe_count=probe_count,
                                    data_support_exponent=data_support_exponent,
                                    random_seed=random_seed,
-                                   return_all=return_all)
+                                   return_all=return_all,
+                                   inr_spatial_shape=inr_spatial_shape,
+                                   inr_sh_order=inr_sh_order)
         params.set_tracker_c(parallel_transport_propagator)
         return params
     elif algo_name == 'eudx':
@@ -89,7 +95,8 @@ cdef class TrackerParameters:
                  probe_radius=None, probe_quality=None, probe_count=None,
                  data_support_exponent=None, random_seed=None,
                  peak_values_threshold=None, angle_threshold=None,
-                 min_total_weight=None):
+                 min_total_weight=None, inr_spatial_shape=None,
+                 inr_sh_order=8):
         cdef cnp.npy_intp i
 
         self.max_nbr_pts = int(max_len/step_size)
@@ -110,11 +117,16 @@ cdef class TrackerParameters:
             self.step_size / self.average_voxel_size)
 
         self.sh = None
+        self.inr = None
         self.ptt = None
         self.eudx = None
 
         if pmf_threshold is not None:
             self.sh = ShTrackerParameters(pmf_threshold)
+
+        if inr_spatial_shape is not None and pmf_threshold is not None:
+            self.inr = INRTrackerParameters(pmf_threshold, inr_spatial_shape,
+                                            inr_sh_order)
 
         if probe_length is not None and probe_radius is not None and probe_quality is not None and probe_count is not None and data_support_exponent is not None:
             self.ptt = ParallelTransportTrackerParameters(probe_length, probe_radius, probe_quality, probe_count, data_support_exponent)
@@ -136,6 +148,29 @@ cdef class ShTrackerParameters:
 
     def __init__(self, pmf_threshold):
         self.pmf_threshold = pmf_threshold
+
+
+cdef class INRTrackerParameters(ShTrackerParameters):
+    """Tracker parameters for INR-backed PMF generation.
+
+    Extends :class:`ShTrackerParameters` with the spatial shape and SH order
+    required to construct :class:`~dipy.direction.pmf.INRPmfGen`.
+
+    Parameters
+    ----------
+    pmf_threshold : double
+        Minimum PMF value; directions below this threshold are ignored.
+    spatial_shape : tuple of int, (X, Y, Z)
+        Spatial dimensions of the source volume used for coordinate
+        normalisation inside the INR.
+    sh_order : int
+        Maximum SH order of the model output (e.g. 8 for lmax=8, 45 coeffs).
+    """
+
+    def __init__(self, pmf_threshold, spatial_shape, int sh_order):
+        ShTrackerParameters.__init__(self, pmf_threshold)
+        self.spatial_shape = tuple(spatial_shape)
+        self.sh_order = sh_order
 
 cdef class ParallelTransportTrackerParameters:
 

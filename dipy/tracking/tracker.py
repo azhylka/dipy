@@ -8,7 +8,7 @@ from dipy.direction import (
     ProbabilisticDirectionGetter,
 )
 from dipy.direction.peaks import peaks_from_positions
-from dipy.direction.pmf import SHCoeffPmfGen, SimplePeakGen, SimplePmfGen
+from dipy.direction.pmf import INRPmfGen, SHCoeffPmfGen, SimplePeakGen, SimplePmfGen
 from dipy.tracking.local_tracking import LocalTracking, ParticleFilteringTracking
 from dipy.tracking.tracker_parameters import generate_tracking_parameters
 from dipy.tracking.tractogen import generate_tractogram
@@ -25,6 +25,7 @@ def generic_tracking(
     sh=None,
     pam=None,
     sf=None,
+    inr_model=None,
     sphere=None,
     basis_type=None,
     legacy=True,
@@ -39,6 +40,7 @@ def generic_tracking(
         {"name": "sh", "value": sh, "cls": SHCoeffPmfGen},
         {"name": "pam", "value": pam, "cls": SimplePeakGen},
         {"name": "sf", "value": sf, "cls": SimplePmfGen},
+        {"name": "inr_model", "value": inr_model, "cls": INRPmfGen},
     ]
 
     initialized_pmf = [
@@ -90,6 +92,26 @@ def generic_tracking(
         pmf_gen = selected_pmf["cls"](
             np.asarray(selected_pmf["value"], dtype=float),
             sphere,
+            basis_type=basis_type,
+            legacy=legacy,
+        )
+    elif selected_pmf["name"] == "inr_model":
+        if INRPmfGen is None:
+            raise RuntimeError(
+                "INRPmfGen is not available. "
+                "Rebuild dipy with libtorch support to use inr_model."
+            )
+        if params.inr is None:
+            raise ValueError(
+                "inr_model requires INR parameters in the tracker params. "
+                "Pass inr_spatial_shape and inr_sh_order to "
+                "generate_tracking_parameters."
+            )
+        pmf_gen = selected_pmf["cls"](
+            selected_pmf["value"],
+            params.inr.spatial_shape,
+            sphere,
+            params.inr.sh_order,
             basis_type=basis_type,
             legacy=legacy,
         )
@@ -173,6 +195,9 @@ def probabilistic_tracking(
     sh=None,
     pam=None,
     sf=None,
+    inr_model=None,
+    inr_spatial_shape=None,
+    inr_sh_order=8,
     min_len=2,
     max_len=500,
     step_size=0.2,
@@ -261,6 +286,8 @@ def probabilistic_tracking(
         pmf_threshold=pmf_threshold,
         random_seed=random_seed,
         return_all=return_all,
+        inr_spatial_shape=inr_spatial_shape,
+        inr_sh_order=inr_sh_order,
     )
 
     return generic_tracking(
@@ -272,6 +299,7 @@ def probabilistic_tracking(
         sh=sh,
         pam=pam,
         sf=sf,
+        inr_model=inr_model,
         sphere=sphere,
         basis_type=basis_type,
         legacy=legacy,
@@ -290,6 +318,9 @@ def deterministic_tracking(
     sh=None,
     pam=None,
     sf=None,
+    inr_model=None,
+    inr_spatial_shape=None,
+    inr_sh_order=8,
     min_len=2,
     max_len=500,
     step_size=0.2,
@@ -378,6 +409,8 @@ def deterministic_tracking(
         pmf_threshold=pmf_threshold,
         random_seed=random_seed,
         return_all=return_all,
+        inr_spatial_shape=inr_spatial_shape,
+        inr_sh_order=inr_sh_order,
     )
     return generic_tracking(
         seed_positions,
@@ -388,6 +421,7 @@ def deterministic_tracking(
         sh=sh,
         pam=pam,
         sf=sf,
+        inr_model=inr_model,
         sphere=sphere,
         basis_type=basis_type,
         legacy=legacy,
@@ -406,6 +440,9 @@ def ptt_tracking(
     sh=None,
     pam=None,
     sf=None,
+    inr_model=None,
+    inr_spatial_shape=None,
+    inr_sh_order=8,
     min_len=2,
     max_len=500,
     step_size=0.5,
@@ -513,6 +550,8 @@ def ptt_tracking(
         probe_count=probe_count,
         data_support_exponent=data_support_exponent,
         return_all=return_all,
+        inr_spatial_shape=inr_spatial_shape,
+        inr_sh_order=inr_sh_order,
     )
     return generic_tracking(
         seed_positions,
@@ -523,6 +562,7 @@ def ptt_tracking(
         sh=sh,
         pam=pam,
         sf=sf,
+        inr_model=inr_model,
         sphere=sphere,
         basis_type=basis_type,
         legacy=legacy,

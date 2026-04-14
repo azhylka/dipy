@@ -18,9 +18,11 @@ from .probabilistic_direction_getter import (
     DeterministicMaximumDirectionGetter,
     ProbabilisticDirectionGetter,
 )
+from .pmf import INRPmfGen
 from .ptt_direction_getter import PTTDirectionGetter
 
 __all__ = [
+    "INRPmfGen",
     "BootDirectionGetter",
     "ClosestPeakDirectionGetter",
     "DeterministicMaximumDirectionGetter",

@@ -38,6 +38,7 @@ endforeach
 
 python_sources = ['__init__.py',
   '_utils.py',
+  'inr_tracking.py',
   'learning.py',
   'life.py',
   'local_tracking.py',

@@ -29,6 +29,10 @@ cdef class ParallelTransportTrackerParameters:
 cdef class ShTrackerParameters:
     cdef public double pmf_threshold
 
+cdef class INRTrackerParameters(ShTrackerParameters):
+    cdef public object spatial_shape
+    cdef public int sh_order
+
 cdef class EudxTrackerParameters:
     cdef public double peak_values_threshold
     cdef public double angle_threshold
@@ -50,6 +54,7 @@ cdef class TrackerParameters:
     cdef public bint return_all
 
     cdef public ShTrackerParameters sh
+    cdef public INRTrackerParameters inr
     cdef public ParallelTransportTrackerParameters ptt
     cdef public EudxTrackerParameters eudx
 
