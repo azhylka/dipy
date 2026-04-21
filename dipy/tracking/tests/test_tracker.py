@@ -301,16 +301,18 @@ def test_mlft_tracking():
             max_levels=2,
             random_seed=1,
         )
-        npt.assert_(len(target_only) <= len(streamlines),
-                     "return_all=False should return fewer or equal streamlines")
+        npt.assert_(
+            len(target_only) <= len(streamlines),
+            "return_all=False should return fewer or equal streamlines",
+        )
 
         # Test with a restrictive target mask (small region) to trigger branching
         small_target = np.zeros(mask.shape, dtype=bool)
         center = [s // 2 for s in mask.shape]
         small_target[
-            center[0] - 2:center[0] + 2,
-            center[1] - 2:center[1] + 2,
-            center[2] - 2:center[2] + 2,
+            center[0] - 2 : center[0] + 2,
+            center[1] - 2 : center[1] + 2,
+            center[2] - 2 : center[2] + 2,
         ] = True
 
         streamlines_branched = tracker.mlft_tracking(

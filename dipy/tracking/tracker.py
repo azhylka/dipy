@@ -1100,9 +1100,7 @@ def _build_pmf_gen(sh, pam, sf, sphere, basis_type, legacy, params=None):
     if len(initialized_pmf) != 1:
         names = ", ".join(d["name"] for d in pmf_type)
         if len(initialized_pmf) == 0:
-            raise ValueError(
-                f"No PMF found. One of ({names}) should be initialized."
-            )
+            raise ValueError(f"No PMF found. One of ({names}) should be initialized.")
         raise ValueError(
             "Only one pmf type should be initialized. "
             f"Variables initialized: {', '.join(p['name'] for p in initialized_pmf)}"
@@ -1400,7 +1398,7 @@ def mlft_tracking(
             non_target_indices.append(idx)
 
     # --- Levels 2..max_levels ---
-    for level in range(2, max_levels + 1):
+    for _level in range(2, max_levels + 1):
         if not non_target_streamlines:
             break
 
