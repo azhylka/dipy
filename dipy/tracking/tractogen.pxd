@@ -25,6 +25,29 @@ cdef StreamlineStatus generate_local_streamline(double* seed,
                                    PmfGen pmf_gen) noexcept nogil
 
 
+cdef void generate_tractogram_c_with_dirs(double[:,::1] seed_positions,
+                                          double[:,::1] seed_directions,
+                                          int nbr_threads,
+                                          StoppingCriterion sc,
+                                          TrackerParameters params,
+                                          PmfGen pmf_gen,
+                                          double** streamlines,
+                                          int* length,
+                                          StreamlineStatus* status,
+                                          int** dirs_arr)
+
+
+cdef StreamlineStatus generate_local_streamline_with_dirs(
+                                   double* seed,
+                                   double* position,
+                                   double* stream,
+                                   int* stream_idx,
+                                   int* chosen_dirs,
+                                   StoppingCriterion sc,
+                                   TrackerParameters params,
+                                   PmfGen pmf_gen) noexcept nogil
+
+
 cdef void prepare_pmf(double* pmf,
                       double* point,
                       PmfGen pmf_gen,

@@ -756,6 +756,8 @@ cdef TrackerStatus deterministic_propagator(double* point,
         return TrackerStatus.FAIL
 
     newdir = &pmf_gen.vertices[max_idx][0]
+    # Store chosen vertex index for MLFT branch seed extraction
+    stream_data[99] = <double>max_idx
     # Update direction
     if (direction[0] * newdir[0]
         + direction[1] * newdir[1]

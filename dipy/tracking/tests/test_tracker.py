@@ -238,3 +238,96 @@ def test_eudx_tracking():
         )
     )
     npt.assert_equal(len(streamlines_explicit), len(seeds))
+
+
+def test_mlft_tracking():
+    """Test the mlft_tracking function."""
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=descoteaux07_legacy_msg,
+            category=PendingDeprecationWarning,
+        )
+
+        fnames = get_fnames(name="disco1", include_optional=True)
+        sphere = HemiSphere.from_sphere(get_sphere(name="repulsion724"))
+        sh = nib.load(fnames[20]).get_fdata()
+
+        mask = nib.load(fnames[25]).get_fdata()
+        sc = BinaryStoppingCriterion(mask)
+        affine = nib.load(fnames[25]).affine
+
+        seed_mask = np.ones(mask.shape)
+        seeds = random_seeds_from_mask(
+            seed_mask, affine, seeds_count=50, seed_count_per_voxel=False
+        )
+
+        # Use the brain mask itself as a target so most streamlines reach it
+        target_mask = mask.astype(bool)
+
+        # Basic test: runs without error, returns streamlines
+        streamlines = tracker.mlft_tracking(
+            seeds,
+            sc,
+            affine,
+            target_mask,
+            sh=sh,
+            sphere=sphere,
+            max_angle=45,
+            step_size=0.5,
+            min_len=0,
+            max_len=500,
+            pmf_threshold=0.1,
+            return_all=True,
+            max_levels=2,
+            random_seed=1,
+        )
+        npt.assert_(len(streamlines) > 0, "MLFT should produce streamlines")
+
+        # Test return_all=False: only target-reaching
+        target_only = tracker.mlft_tracking(
+            seeds,
+            sc,
+            affine,
+            target_mask,
+            sh=sh,
+            sphere=sphere,
+            max_angle=45,
+            step_size=0.5,
+            min_len=0,
+            max_len=500,
+            pmf_threshold=0.1,
+            return_all=False,
+            max_levels=2,
+            random_seed=1,
+        )
+        npt.assert_(len(target_only) <= len(streamlines),
+                     "return_all=False should return fewer or equal streamlines")
+
+        # Test with a restrictive target mask (small region) to trigger branching
+        small_target = np.zeros(mask.shape, dtype=bool)
+        center = [s // 2 for s in mask.shape]
+        small_target[
+            center[0] - 2:center[0] + 2,
+            center[1] - 2:center[1] + 2,
+            center[2] - 2:center[2] + 2,
+        ] = True
+
+        streamlines_branched = tracker.mlft_tracking(
+            seeds,
+            sc,
+            affine,
+            small_target,
+            sh=sh,
+            sphere=sphere,
+            max_angle=45,
+            step_size=0.5,
+            min_len=0,
+            max_len=500,
+            pmf_threshold=0.1,
+            return_all=True,
+            max_levels=2,
+            random_seed=1,
+        )
+        # Should run without error; may or may not find target-reaching streamlines
+        npt.assert_(isinstance(streamlines_branched, list))

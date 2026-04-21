@@ -11,7 +11,7 @@ from dipy.direction.peaks import peaks_from_positions
 from dipy.direction.pmf import INRPmfGen, SHCoeffPmfGen, SimplePeakGen, SimplePmfGen
 from dipy.tracking.local_tracking import LocalTracking, ParticleFilteringTracking
 from dipy.tracking.tracker_parameters import generate_tracking_parameters
-from dipy.tracking.tractogen import generate_tractogram
+from dipy.tracking.tractogen import generate_tractogram, generate_tractogram_with_dirs
 from dipy.tracking.utils import seeds_directions_pairs
 
 
@@ -1086,3 +1086,370 @@ def pft_tracking(
         unidirectional=unidirectional,
         randomize_forward_direction=randomize_forward_direction,
     )
+
+
+def _build_pmf_gen(sh, pam, sf, sphere, basis_type, legacy, params=None):
+    """Build a PmfGen from whichever data source is provided."""
+    pmf_type = [
+        {"name": "sh", "value": sh, "cls": SHCoeffPmfGen},
+        {"name": "pam", "value": pam, "cls": SimplePeakGen},
+        {"name": "sf", "value": sf, "cls": SimplePmfGen},
+    ]
+
+    initialized_pmf = [d for d in pmf_type if d["value"] is not None]
+    if len(initialized_pmf) != 1:
+        names = ", ".join(d["name"] for d in pmf_type)
+        if len(initialized_pmf) == 0:
+            raise ValueError(
+                f"No PMF found. One of ({names}) should be initialized."
+            )
+        raise ValueError(
+            "Only one pmf type should be initialized. "
+            f"Variables initialized: {', '.join(p['name'] for p in initialized_pmf)}"
+        )
+
+    selected_pmf = initialized_pmf[0]
+
+    if selected_pmf["name"] == "sf" and sphere is None:
+        raise ValueError("A sphere should be defined when using SF (an ODF).")
+
+    sphere = sphere or default_sphere
+
+    if selected_pmf["name"] == "pam":
+        peak_data = selected_pmf["value"]
+        if not hasattr(peak_data, "peak_indices") or not hasattr(
+            peak_data, "peak_values"
+        ):
+            raise ValueError(
+                "pam must be a PeaksAndMetrics object with "
+                "peak_indices and peak_values attributes"
+            )
+        odf_vertices = (
+            peak_data.odf_vertices
+            if hasattr(peak_data, "odf_vertices") and peak_data.odf_vertices is not None
+            else sphere.vertices
+        )
+        pmf_gen = selected_pmf["cls"](
+            np.asarray(peak_data.peak_indices, dtype=np.int32, order="C"),
+            np.asarray(peak_data.peak_values, dtype=float, order="C"),
+            np.asarray(odf_vertices, dtype=float, order="C"),
+            sphere,
+        )
+    elif selected_pmf["name"] == "sh":
+        pmf_gen = selected_pmf["cls"](
+            np.asarray(selected_pmf["value"], dtype=float),
+            sphere,
+            basis_type=basis_type,
+            legacy=legacy,
+        )
+    else:
+        pmf_gen = selected_pmf["cls"](
+            np.asarray(selected_pmf["value"], dtype=float), sphere
+        )
+
+    return pmf_gen, sphere
+
+
+def _resolve_seed_directions(seed_positions, seed_directions, pmf_gen, affine):
+    """Resolve seed directions from pmf_gen when not explicitly provided."""
+    if seed_directions is not None:
+        if isinstance(seed_directions, list):
+            seed_directions = np.array(seed_directions)
+        if not np.array_equal(seed_directions.shape, seed_positions.shape):
+            raise ValueError(
+                "seed_directions and seed_positions should have the same shape."
+            )
+        return seed_positions, seed_directions
+
+    peaks_obj = peaks_from_positions(
+        seed_positions, None, None, npeaks=1, affine=affine, pmf_gen=pmf_gen
+    )
+    return seeds_directions_pairs(seed_positions, peaks_obj, max_cross=None)
+
+
+def _extract_branch_seeds(
+    streamlines,
+    vertex_indices_list,
+    pmf_gen,
+    sphere,
+    affine,
+    relative_peak_threshold,
+    min_separation_angle,
+):
+    """Extract unused FOD peak directions at streamline points as branch seeds.
+
+    For each point along each streamline, the FOD is evaluated, all peaks
+    above threshold are extracted, and any peak that is not the one chosen
+    by the tracker (identified via ``vertex_indices_list``) becomes a
+    candidate branch seed.
+
+    Parameters
+    ----------
+    streamlines : list of ndarray
+        Streamlines in world space, each shape (N, 3).
+    vertex_indices_list : list of ndarray
+        Per-streamline sphere vertex indices, each shape (N,) int32.
+    pmf_gen : PmfGen
+        Probability mass function generator.
+    sphere : Sphere
+        Sphere used for tracking.
+    affine : ndarray
+        Voxel-to-world affine.
+    relative_peak_threshold : float
+        Minimum peak height relative to the largest peak.
+    min_separation_angle : float
+        Minimum angular separation between distinct peaks (degrees).
+
+    Returns
+    -------
+    branch_positions : ndarray or None
+        World-space positions of branch seeds, shape (M, 3).
+    branch_directions : ndarray or None
+        Directions for each branch seed, shape (M, 3).
+
+    """
+    from dipy.reconst.dirspeed import peak_directions
+
+    inv_affine = np.linalg.inv(affine)
+    cos_sep = np.cos(np.deg2rad(min_separation_angle))
+
+    branch_positions = []
+    branch_directions = []
+
+    for streamline, vertex_indices in zip(streamlines, vertex_indices_list):
+        # Convert to voxel space for pmf_gen
+        vox_points = np.dot(streamline, inv_affine[:3, :3].T) + inv_affine[:3, 3]
+
+        for k in range(len(streamline)):
+            used_idx = vertex_indices[k]
+            if used_idx < 0:
+                continue  # seed point, skip
+
+            used_dir = sphere.vertices[used_idx]
+            odf = pmf_gen.get_pmf(vox_points[k])
+            if odf is None or np.max(odf) <= 0:
+                continue
+
+            peaks, values, _ = peak_directions(
+                odf,
+                sphere,
+                relative_peak_threshold=relative_peak_threshold,
+                min_separation_angle=min_separation_angle,
+            )
+
+            for peak_dir in peaks:
+                cos_angle = abs(np.dot(peak_dir, used_dir))
+                if cos_angle < cos_sep:
+                    branch_positions.append(streamline[k])
+                    branch_directions.append(peak_dir)
+
+    if branch_positions:
+        return np.array(branch_positions), np.array(branch_directions)
+    return None, None
+
+
+def mlft_tracking(
+    seed_positions,
+    sc,
+    affine,
+    target_mask,
+    *,
+    seed_directions=None,
+    sh=None,
+    pam=None,
+    sf=None,
+    min_len=2,
+    max_len=500,
+    step_size=0.5,
+    voxel_size=None,
+    max_angle=45,
+    pmf_threshold=0.1,
+    sphere=None,
+    basis_type=None,
+    legacy=True,
+    nbr_threads=0,
+    random_seed=0,
+    seed_buffer_fraction=1.0,
+    return_all=True,
+    max_levels=2,
+    relative_peak_threshold=0.5,
+    min_separation_angle=25,
+):
+    """Multi-Level Fiber Tractography (MLFT) tracking algorithm.
+
+    Implements the MLFT method from Hamed et al. (MAGMA 2022). Performs
+    deterministic CSD-based tracking and iteratively branches from unused
+    FOD peaks at streamline points that did not reach the target region.
+
+    Parameters
+    ----------
+    seed_positions : ndarray
+        Seed positions in world space, shape (N, 3).
+    sc : StoppingCriterion
+        Stopping criterion.
+    affine : ndarray
+        Voxel-to-world affine matrix, shape (4, 4).
+    target_mask : ndarray
+        Binary mask of the target region. Only streamlines passing through
+        this region are considered successful.
+    seed_directions : ndarray, optional
+        Seed directions, shape (N, 3). If None, directions are estimated
+        from the FOD data.
+    sh : ndarray, optional
+        Spherical Harmonics (SH) coefficients.
+    pam : PeaksAndMetrics, optional
+        Peaks and Metrics object.
+    sf : ndarray, optional
+        Spherical Function (SF).
+    min_len : int, optional
+        Minimum streamline length in mm.
+    max_len : int, optional
+        Maximum streamline length in mm.
+    step_size : float, optional
+        Step size of the tracking in mm.
+    voxel_size : ndarray, optional
+        Voxel size. Inferred from affine if not provided.
+    max_angle : float, optional
+        Maximum angle between successive steps in degrees.
+    pmf_threshold : float, optional
+        PMF threshold.
+    sphere : Sphere, optional
+        Sphere for SH evaluation.
+    basis_type : str, optional
+        SH basis type.
+    legacy : bool, optional
+        Use legacy SH basis definition.
+    nbr_threads : int, optional
+        Number of threads (0 = all available).
+    random_seed : int, optional
+        Random seed for reproducibility.
+    seed_buffer_fraction : float, optional
+        Fraction of seed buffer to process per batch.
+    return_all : bool, optional
+        If True, return all streamlines (target-reaching and non-target).
+        If False, return only target-reaching streamlines.
+    max_levels : int, optional
+        Maximum number of branching levels. The paper recommends 2.
+    relative_peak_threshold : float, optional
+        Minimum peak height relative to the largest peak, used during
+        branch seed extraction.
+    min_separation_angle : float, optional
+        Minimum angular separation between peaks in degrees, used during
+        branch seed extraction.
+
+    Returns
+    -------
+    list of ndarray
+        Streamlines in world space.
+
+    """
+    from dipy.tracking.utils import target
+
+    voxel_size = voxel_size if voxel_size is not None else voxel_sizes(affine)
+
+    params = generate_tracking_parameters(
+        "det",
+        min_len=min_len,
+        max_len=max_len,
+        step_size=step_size,
+        voxel_size=voxel_size,
+        max_angle=max_angle,
+        pmf_threshold=pmf_threshold,
+        random_seed=random_seed,
+        return_all=True,  # always collect all at tracking level; filter later
+    )
+
+    pmf_gen, sphere = _build_pmf_gen(sh, pam, sf, sphere, basis_type, legacy)
+    seed_positions, seed_directions = _resolve_seed_directions(
+        seed_positions, seed_directions, pmf_gen, affine
+    )
+
+    # --- Level 1 tracking ---
+    all_streamlines = []
+    all_indices = []
+    for track, idx_arr in generate_tractogram_with_dirs(
+        seed_positions,
+        seed_directions,
+        sc,
+        params,
+        pmf_gen,
+        affine=affine,
+        nbr_threads=nbr_threads,
+        buffer_frac=seed_buffer_fraction,
+    ):
+        all_streamlines.append(track)
+        all_indices.append(idx_arr)
+
+    if not all_streamlines:
+        return []
+
+    # --- Split into target-reaching and non-target ---
+    target_streamlines = []
+    non_target_streamlines = []
+    non_target_indices = []
+
+    target_set = set()
+    for sl in target(all_streamlines, affine, target_mask, include=True):
+        target_set.add(id(sl))
+
+    for sl, idx in zip(all_streamlines, all_indices):
+        if id(sl) in target_set:
+            target_streamlines.append(sl)
+        else:
+            non_target_streamlines.append(sl)
+            non_target_indices.append(idx)
+
+    # --- Levels 2..max_levels ---
+    for level in range(2, max_levels + 1):
+        if not non_target_streamlines:
+            break
+
+        branch_pos, branch_dirs = _extract_branch_seeds(
+            non_target_streamlines,
+            non_target_indices,
+            pmf_gen,
+            sphere,
+            affine,
+            relative_peak_threshold,
+            min_separation_angle,
+        )
+
+        if branch_pos is None or len(branch_pos) == 0:
+            break
+
+        # Track from branch seeds
+        level_streamlines = []
+        level_indices = []
+        for track, idx_arr in generate_tractogram_with_dirs(
+            branch_pos,
+            branch_dirs,
+            sc,
+            params,
+            pmf_gen,
+            affine=affine,
+            nbr_threads=nbr_threads,
+            buffer_frac=seed_buffer_fraction,
+        ):
+            level_streamlines.append(track)
+            level_indices.append(idx_arr)
+
+        if not level_streamlines:
+            break
+
+        # Filter new streamlines by target
+        new_target_set = set()
+        for sl in target(level_streamlines, affine, target_mask, include=True):
+            new_target_set.add(id(sl))
+
+        non_target_streamlines = []
+        non_target_indices = []
+        for sl, idx in zip(level_streamlines, level_indices):
+            if id(sl) in new_target_set:
+                target_streamlines.append(sl)
+            else:
+                non_target_streamlines.append(sl)
+                non_target_indices.append(idx)
+
+    if return_all:
+        return target_streamlines + non_target_streamlines
+    return target_streamlines
