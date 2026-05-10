@@ -1088,12 +1088,13 @@ def pft_tracking(
     )
 
 
-def _build_pmf_gen(sh, pam, sf, sphere, basis_type, legacy, params=None):
+def _build_pmf_gen(sh, pam, sf, inr_model, sphere, basis_type, legacy, params=None):
     """Build a PmfGen from whichever data source is provided."""
     pmf_type = [
         {"name": "sh", "value": sh, "cls": SHCoeffPmfGen},
         {"name": "pam", "value": pam, "cls": SimplePeakGen},
         {"name": "sf", "value": sf, "cls": SimplePmfGen},
+        {"name": "inr_model", "value": inr_model, "cls": INRPmfGen},
     ]
 
     initialized_pmf = [d for d in pmf_type if d["value"] is not None]
@@ -1137,6 +1138,25 @@ def _build_pmf_gen(sh, pam, sf, sphere, basis_type, legacy, params=None):
         pmf_gen = selected_pmf["cls"](
             np.asarray(selected_pmf["value"], dtype=float),
             sphere,
+            basis_type=basis_type,
+            legacy=legacy,
+        )
+    elif selected_pmf["name"] == "inr_model":
+        if INRPmfGen is None:
+            raise RuntimeError(
+                "INRPmfGen is not available. "
+                "Rebuild dipy with libtorch support to use inr_model."
+            )
+        if params is None or params.inr is None:
+            raise ValueError(
+                "inr_model requires INR parameters in the tracker params. "
+                "Pass inr_spatial_shape and inr_sh_order to mlft_tracking."
+            )
+        pmf_gen = selected_pmf["cls"](
+            selected_pmf["value"],
+            params.inr.spatial_shape,
+            sphere,
+            params.inr.sh_order,
             basis_type=basis_type,
             legacy=legacy,
         )
@@ -1256,6 +1276,9 @@ def mlft_tracking(
     sh=None,
     pam=None,
     sf=None,
+    inr_model=None,
+    inr_spatial_shape=None,
+    inr_sh_order=8,
     min_len=2,
     max_len=500,
     step_size=0.5,
@@ -1299,6 +1322,13 @@ def mlft_tracking(
         Peaks and Metrics object.
     sf : ndarray, optional
         Spherical Function (SF).
+    inr_model : object, optional
+        Implicit Neural Representation (TorchScript) model for FOD evaluation.
+    inr_spatial_shape : tuple, optional
+        Spatial shape (X, Y, Z) of the volume the INR was trained on.
+        Required when using ``inr_model``.
+    inr_sh_order : int, optional
+        SH order produced by the INR. Default 8.
     min_len : int, optional
         Minimum streamline length in mm.
     max_len : int, optional
@@ -1355,9 +1385,13 @@ def mlft_tracking(
         pmf_threshold=pmf_threshold,
         random_seed=random_seed,
         return_all=True,  # always collect all at tracking level; filter later
+        inr_spatial_shape=inr_spatial_shape,
+        inr_sh_order=inr_sh_order,
     )
 
-    pmf_gen, sphere = _build_pmf_gen(sh, pam, sf, sphere, basis_type, legacy)
+    pmf_gen, sphere = _build_pmf_gen(
+        sh, pam, sf, inr_model, sphere, basis_type, legacy, params=params
+    )
     seed_positions, seed_directions = _resolve_seed_directions(
         seed_positions, seed_directions, pmf_gen, affine
     )
